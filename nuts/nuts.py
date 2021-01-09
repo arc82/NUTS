@@ -59,7 +59,7 @@ from .helpers import progress_range
 
 __all__ = ['nuts6']
 
-def leapfrog(theta, r, grad, epsilon, f):
+def leapfrog(theta, r, grad, epsilon, f, lf_history=None):
     """ Perfom a leapfrog jump in the Hamiltonian space
     INPUTS
     ------
@@ -98,7 +98,14 @@ def leapfrog(theta, r, grad, epsilon, f):
     logpprime, gradprime = f(thetaprime)
     # make half step in r again
     rprime = rprime + 0.5 * epsilon * gradprime
-    return thetaprime, rprime, gradprime, logpprime
+
+    if lf_history is not None:
+        lf_history.append((theta[0], thetaprime[0]))
+
+    if lf_history is None:
+        return thetaprime, rprime, gradprime, logpprime
+    else:
+        return thetaprime, rprime, gradprime, logpprime, lf_history
 
 
 def find_reasonable_epsilon(theta0, grad0, logp0, f):
@@ -155,11 +162,15 @@ def stop_criterion(thetaminus, thetaplus, rminus, rplus):
     return (np.dot(dtheta, rminus.T) >= 0) & (np.dot(dtheta, rplus.T) >= 0)
 
 
-def build_tree(theta, r, grad, logu, v, j, epsilon, f, joint0):
+def build_tree(theta, r, grad, logu, v, j, epsilon, f, joint0, lf_history=None):
     """The main recursion."""
     if (j == 0):
         # Base case: Take a single leapfrog step in the direction v.
-        thetaprime, rprime, gradprime, logpprime = leapfrog(theta, r, grad, v * epsilon, f)
+        if lf_history is None:
+            thetaprime, rprime, gradprime, logpprime = leapfrog(theta, r, grad, v * epsilon, f)
+        else:
+            thetaprime, rprime, gradprime, logpprime, lf_history = leapfrog(theta, r, grad, v * epsilon, f, lf_history)
+
         joint = logpprime - 0.5 * np.dot(rprime, rprime.T)
         # Is the new point in the slice?
         nprime = int(logu < joint)
@@ -179,13 +190,23 @@ def build_tree(theta, r, grad, logu, v, j, epsilon, f, joint0):
         nalphaprime = 1
     else:
         # Recursion: Implicitly build the height j-1 left and right subtrees.
-        thetaminus, rminus, gradminus, thetaplus, rplus, gradplus, thetaprime, gradprime, logpprime, nprime, sprime, alphaprime, nalphaprime = build_tree(theta, r, grad, logu, v, j - 1, epsilon, f, joint0)
+        if lf_history is None:
+            thetaminus, rminus, gradminus, thetaplus, rplus, gradplus, thetaprime, gradprime, logpprime, nprime, sprime, alphaprime, nalphaprime = build_tree(theta, r, grad, logu, v, j - 1, epsilon, f, joint0)
+        else:
+            thetaminus, rminus, gradminus, thetaplus, rplus, gradplus, thetaprime, gradprime, logpprime, nprime, sprime, alphaprime, nalphaprime, lf_history = build_tree(theta, r, grad, logu, v, j - 1, epsilon, f, joint0, lf_history)
         # No need to keep going if the stopping criteria were met in the first subtree.
         if (sprime == 1):
             if (v == -1):
-                thetaminus, rminus, gradminus, _, _, _, thetaprime2, gradprime2, logpprime2, nprime2, sprime2, alphaprime2, nalphaprime2 = build_tree(thetaminus, rminus, gradminus, logu, v, j - 1, epsilon, f, joint0)
+                if lf_history is None:
+                    thetaminus, rminus, gradminus, _, _, _, thetaprime2, gradprime2, logpprime2, nprime2, sprime2, alphaprime2, nalphaprime2 = build_tree(thetaminus, rminus, gradminus, logu, v, j - 1, epsilon, f, joint0)
+                else:
+                    thetaminus, rminus, gradminus, _, _, _, thetaprime2, gradprime2, logpprime2, nprime2, sprime2, alphaprime2, nalphaprime2 , lf_history= build_tree(thetaminus, rminus, gradminus, logu, v, j - 1, epsilon, f, joint0, lf_history)
+
             else:
-                _, _, _, thetaplus, rplus, gradplus, thetaprime2, gradprime2, logpprime2, nprime2, sprime2, alphaprime2, nalphaprime2 = build_tree(thetaplus, rplus, gradplus, logu, v, j - 1, epsilon, f, joint0)
+                if lf_history is None:
+                    _, _, _, thetaplus, rplus, gradplus, thetaprime2, gradprime2, logpprime2, nprime2, sprime2, alphaprime2, nalphaprime2 = build_tree(thetaplus, rplus, gradplus, logu, v, j - 1, epsilon, f, joint0)
+                else:
+                    _, _, _, thetaplus, rplus, gradplus, thetaprime2, gradprime2, logpprime2, nprime2, sprime2, alphaprime2, nalphaprime2, lf_history = build_tree(thetaplus, rplus, gradplus, logu, v, j - 1, epsilon, f, joint0, lf_history)
             # Choose which subtree to propagate a sample up from.
             if (np.random.uniform() < (float(nprime2) / max(float(int(nprime) + int(nprime2)), 1.))):
                 thetaprime = thetaprime2[:]
@@ -199,10 +220,86 @@ def build_tree(theta, r, grad, logu, v, j, epsilon, f, joint0):
             alphaprime = alphaprime + alphaprime2
             nalphaprime = nalphaprime + nalphaprime2
 
-    return thetaminus, rminus, gradminus, thetaplus, rplus, gradplus, thetaprime, gradprime, logpprime, nprime, sprime, alphaprime, nalphaprime
+    if lf_history is None:
+        return thetaminus, rminus, gradminus, thetaplus, rplus, gradplus, thetaprime, gradprime, logpprime, nprime, sprime, alphaprime, nalphaprime
+    else:
+        return thetaminus, rminus, gradminus, thetaplus, rplus, gradplus, thetaprime, gradprime, logpprime, nprime, sprime, alphaprime, nalphaprime, lf_history
+
+def find_lf_dist(lf_history, start, end):
+    assert lf_history[0][0] == start
+
+    if start == end:
+        return 0
+
+    if lf_history[0][1] == end:
+        return 1
+
+    # check first dir
+    prev_id = 0
+    next_id = 0
+    lf_count = 0
+
+    while(True):
+        if lf_history[next_id][0] == lf_history[prev_id][1]:
+            prev_id = next_id
+            lf_count += 1
+            if lf_history[next_id][0] == end:
+                return lf_count
+            elif lf_history[next_id][1] == end:
+                lf_count += 1
+                return lf_count
+        next_id += 1
+        if next_id >= len(lf_history):
+            break
+
+    # search the other direction
+    # first need to find second occurence of start
+    second_occur_id = -1
+    for i in range(1, len(lf_history)):
+        if lf_history[i][0] == start:
+            second_occur_id = i
+    if second_occur_id == -1:
+        print("ERROR find lf dist failed to find second occurence of start")
+        print("lf history")
+        print(lf_history)
+        print("start")
+        print(start)
+        print("end")
+        print(end)
+        return -1
+
+    prev_id = second_occur_id
+    next_id = second_occur_id
+    lf_count = 0
+    while(True):
+        if lf_history[next_id][0] == lf_history[prev_id][1]:
+            prev_id = next_id
+            lf_count += 1
+            if lf_history[next_id][0] == end:
+                return lf_count
+            elif lf_history[next_id][1] == end:
+                lf_count += 1
+                return lf_count
+        next_id += 1
+        if next_id >= len(lf_history):
+            break
+    
+    print("ERROR find lf dist failed to find the ending point")
+    print("lf history")
+    print(lf_history)
+    print("start")
+    print(start)
+    print("end")
+    print(end)
+    return -1
 
 
-def nuts6(f, M, Madapt, theta0, delta=0.6, progress=False):
+
+
+
+
+def nuts6(f, M, Madapt, theta0, delta=0.6, progress=False, record_lf_steps=False,
+    epsilon=None):
     """
     Implements the No-U-Turn Sampler (NUTS) algorithm 6 from from the NUTS
     paper (Hoffman & Gelman, 2011).
@@ -261,7 +358,8 @@ def nuts6(f, M, Madapt, theta0, delta=0.6, progress=False):
     lnprob[0] = logp
 
     # Choose a reasonable first epsilon by a simple heuristic.
-    epsilon = find_reasonable_epsilon(theta0, grad, logp, f)
+    if epsilon is None:
+        epsilon = find_reasonable_epsilon(theta0, grad, logp, f)
 
     # Parameters to the dual averaging algorithm.
     gamma = 0.05
@@ -272,6 +370,9 @@ def nuts6(f, M, Madapt, theta0, delta=0.6, progress=False):
     # Initialize dual averaging algorithm.
     epsilonbar = 1
     Hbar = 0
+
+    if record_lf_steps:
+        lf_dists = []
 
     for m in progress_range(1, M + Madapt, progress=progress):
         # Resample momenta.
@@ -300,15 +401,24 @@ def nuts6(f, M, Madapt, theta0, delta=0.6, progress=False):
         n = 1  # Initially the only valid point is the initial point.
         s = 1  # Main loop: will keep going until s == 0.
 
+        if record_lf_steps:
+            lf_history = []
+
         while (s == 1):
             # Choose a direction. -1 = backwards, 1 = forwards.
             v = int(2 * (np.random.uniform() < 0.5) - 1)
 
             # Double the size of the tree.
             if (v == -1):
-                thetaminus, rminus, gradminus, _, _, _, thetaprime, gradprime, logpprime, nprime, sprime, alpha, nalpha = build_tree(thetaminus, rminus, gradminus, logu, v, j, epsilon, f, joint)
+                if not record_lf_steps:
+                    thetaminus, rminus, gradminus, _, _, _, thetaprime, gradprime, logpprime, nprime, sprime, alpha, nalpha = build_tree(thetaminus, rminus, gradminus, logu, v, j, epsilon, f, joint)
+                else:
+                    thetaminus, rminus, gradminus, _, _, _, thetaprime, gradprime, logpprime, nprime, sprime, alpha, nalpha, lf_history = build_tree(thetaminus, rminus, gradminus, logu, v, j, epsilon, f, joint, lf_history)
             else:
-                _, _, _, thetaplus, rplus, gradplus, thetaprime, gradprime, logpprime, nprime, sprime, alpha, nalpha = build_tree(thetaplus, rplus, gradplus, logu, v, j, epsilon, f, joint)
+                if not record_lf_steps:
+                    _, _, _, thetaplus, rplus, gradplus, thetaprime, gradprime, logpprime, nprime, sprime, alpha, nalpha = build_tree(thetaplus, rplus, gradplus, logu, v, j, epsilon, f, joint)
+                else:
+                    _, _, _, thetaplus, rplus, gradplus, thetaprime, gradprime, logpprime, nprime, sprime, alpha, nalpha, lf_history = build_tree(thetaplus, rplus, gradplus, logu, v, j, epsilon, f, joint, lf_history)
 
             # Use Metropolis-Hastings to decide whether or not to move to a
             # point from the half-tree we just generated.
@@ -325,6 +435,10 @@ def nuts6(f, M, Madapt, theta0, delta=0.6, progress=False):
             # Increment depth.
             j += 1
 
+        if record_lf_steps:
+            lf_dist = find_lf_dist(lf_history, samples[m-1, 0], samples[m, 0])
+            lf_dists.append(lf_dist)
+
         # Do adaptation of epsilon if we're still doing burn-in.
         eta = 1. / float(m + t0)
         Hbar = (1. - eta) * Hbar + eta * (delta - alpha / float(nalpha))
@@ -336,7 +450,11 @@ def nuts6(f, M, Madapt, theta0, delta=0.6, progress=False):
             epsilon = epsilonbar
     samples = samples[Madapt:, :]
     lnprob = lnprob[Madapt:]
-    return samples, lnprob, epsilon
+
+    if not record_lf_steps:
+        return samples, lnprob, epsilon
+    else:
+        return samples, lnprob, epsilon, lf_dists
 
 
 def test_nuts6():
